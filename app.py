@@ -221,15 +221,61 @@ def build_results(participants, price_lookup):
 
 
 # ============================================================
-# 순위 기록 (CSV)
+# 순위 기록 저장소 — Supabase(무료 Postgres) 우선, 없으면 로컬 CSV 폴백
 # ============================================================
+TABLE = "ranking_history"
+
+
+def _supabase():
+    """secrets 에 SUPABASE_URL / SUPABASE_KEY 가 있으면 (base_url, headers) 반환, 없으면 None."""
+    try:
+        url = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+        key = str(st.secrets["SUPABASE_KEY"])
+        if not url or not key:
+            return None
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        }
+        return f"{url}/rest/v1/{TABLE}", headers
+    except Exception:
+        return None
+
+
+def storage_mode():
+    return "supabase" if _supabase() else "csv"
+
+
+def _empty_history():
+    return pd.DataFrame(columns=["timestamp", "name", "roi", "rank"])
+
+
 def load_history():
+    sb = _supabase()
+    if sb:
+        base, headers = sb
+        try:
+            r = requests.get(
+                f"{base}?select=ts,name,roi,rank&order=ts.asc",
+                headers=headers, timeout=8,
+            )
+            r.raise_for_status()
+            rows = r.json()
+            if not rows:
+                return _empty_history()
+            df = pd.DataFrame(rows).rename(columns={"ts": "timestamp"})
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            return df[["timestamp", "name", "roi", "rank"]]
+        except Exception:
+            return _empty_history()
+    # 폴백: 로컬 CSV
     if os.path.exists(HISTORY_FILE):
         try:
             return pd.read_csv(HISTORY_FILE, parse_dates=["timestamp"])
         except Exception:
             pass
-    return pd.DataFrame(columns=["timestamp", "name", "roi", "rank"])
+    return _empty_history()
 
 
 def append_snapshot(df_results, min_gap_minutes=5, now=None):
@@ -238,17 +284,50 @@ def append_snapshot(df_results, min_gap_minutes=5, now=None):
     if not hist.empty:
         last = pd.to_datetime(hist["timestamp"]).max()
         if (now - last).total_seconds() < min_gap_minutes * 60:
-            return hist
+            return hist  # 너무 이르면 적재 안 함
+
     valid = df_results[df_results["유효"]]
     if valid.empty:
         return hist
-    new = pd.DataFrame({
-        "timestamp": now, "name": valid["참가자"].values,
-        "roi": valid["수익률"].values.round(4), "rank": valid["순위"].values,
-    })
+
+    ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    new_rows = [
+        {"ts": ts_str, "name": r["참가자"],
+         "roi": round(float(r["수익률"]), 4), "rank": int(r["순위"])}
+        for _, r in valid.iterrows()
+    ]
+
+    sb = _supabase()
+    if sb:
+        base, headers = sb
+        try:
+            requests.post(base, headers={**headers, "Prefer": "return=minimal"},
+                          json=new_rows, timeout=8).raise_for_status()
+        except Exception:
+            pass  # 저장 실패해도 화면은 계속 동작
+        return load_history()
+
+    # 폴백: 로컬 CSV
+    new = pd.DataFrame([{"timestamp": now, "name": x["name"],
+                         "roi": x["roi"], "rank": x["rank"]} for x in new_rows])
     out = pd.concat([hist, new], ignore_index=True)
     out.to_csv(HISTORY_FILE, index=False)
     return out
+
+
+def clear_history():
+    sb = _supabase()
+    if sb:
+        base, headers = sb
+        try:
+            # PostgREST 는 삭제 시 필터 필수 → 모든 행(id >= 0) 삭제
+            requests.delete(f"{base}?id=gte.0", headers=headers, timeout=8).raise_for_status()
+            return True
+        except Exception:
+            return False
+    if os.path.exists(HISTORY_FILE):
+        os.remove(HISTORY_FILE)
+    return True
 
 
 # ============================================================
@@ -416,10 +495,11 @@ def main():
         if not HAS_AUTOREFRESH and auto:
             st.caption("⚠️ 자동 새로고침엔 `streamlit-autorefresh` 패키지가 필요해요.")
         st.divider()
+        mode = storage_mode()
+        st.caption("☁️ Supabase에 기록 저장 중" if mode == "supabase"
+                   else "💾 로컬 CSV에 기록 저장 중 (Supabase 미설정)")
         if st.button("🗑️ 순위 기록 초기화", use_container_width=True):
-            if os.path.exists(HISTORY_FILE):
-                os.remove(HISTORY_FILE)
-            st.success("기록을 초기화했어요.")
+            st.success("기록을 초기화했어요." if clear_history() else "초기화에 실패했어요.")
 
     if auto and HAS_AUTOREFRESH:
         st_autorefresh(interval=interval * 1000, key="auto_refresh")
@@ -513,7 +593,7 @@ def main():
             st.markdown(f"**{p['name']} · {p['stock_name']} ({p['ticker']})** "
                         f"— picked: `{d.get('picked', d.get('error', '—'))}`")
             st.json(d, expanded=False)
-        st.caption(f"기록 파일 `{HISTORY_FILE}` · 총 {len(history)}행")
+        st.caption(f"저장소: {'☁️ Supabase' if storage_mode()=='supabase' else '💾 로컬 CSV'} · 총 {len(history)}행")
 
 
 if __name__ == "__main__":
