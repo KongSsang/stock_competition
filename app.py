@@ -140,7 +140,7 @@ def fetch_realtime_price(ticker_symbol):
 # ============================================================
 participants = [
     {"name": "송재준", "stock_name": "SPCF", "ticker": "SPCF", "buy_price": 30.15},
-    {"name": "공상민", "stock_name": "LG씨엔에스", "ticker": "480560", "buy_price": 89900},
+    {"name": "공상민", "stock_name": "LG씨엔에스", "ticker": "064400", "buy_price": 89900},
     {"name": "변우진", "stock_name": "한국금융지주", "ticker": "071050", "buy_price": 221500},
     {"name": "오호근", "stock_name": "엔비디아", "ticker": "NVDA", "buy_price": 209.63},
     {"name": "박범휘", "stock_name": "한미반도체", "ticker": "042700", "buy_price": 300500},
