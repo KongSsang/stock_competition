@@ -4,4 +4,3 @@ pandas>=2.0
 requests>=2.31
 plotly>=5.20
 pytz>=2024.1
-streamlit-autorefresh>=1.0.1
