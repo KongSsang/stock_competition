@@ -17,12 +17,6 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-    HAS_AUTOREFRESH = True
-except Exception:
-    HAS_AUTOREFRESH = False
-
 # ============================================================
 # 상수 / 설정
 # ============================================================
@@ -251,6 +245,14 @@ def _empty_history():
     return pd.DataFrame(columns=["timestamp", "name", "roi", "rank"])
 
 
+def _dedup(df):
+    """같은 (시각, 이름) 중복 행 제거 — 차트가 깔끔해지도록."""
+    if df.empty:
+        return df
+    return (df.drop_duplicates(subset=["timestamp", "name"], keep="last")
+              .sort_values("timestamp").reset_index(drop=True))
+
+
 def load_history():
     sb = _supabase()
     if sb:
@@ -266,31 +268,40 @@ def load_history():
                 return _empty_history()
             df = pd.DataFrame(rows).rename(columns={"ts": "timestamp"})
             df["timestamp"] = pd.to_datetime(df["timestamp"])
-            return df[["timestamp", "name", "roi", "rank"]]
+            return _dedup(df[["timestamp", "name", "roi", "rank"]])
         except Exception:
             return _empty_history()
     # 폴백: 로컬 CSV
     if os.path.exists(HISTORY_FILE):
         try:
-            return pd.read_csv(HISTORY_FILE, parse_dates=["timestamp"])
+            return _dedup(pd.read_csv(HISTORY_FILE, parse_dates=["timestamp"]))
         except Exception:
             pass
     return _empty_history()
 
 
-def append_snapshot(df_results, min_gap_minutes=5, now=None):
+def _bucket(dt, minutes):
+    """시각을 기록 간격 단위로 내림 정렬 (예: 60분이면 매시 정각)."""
+    total = (dt.hour * 60 + dt.minute) // minutes * minutes
+    return dt.replace(hour=total // 60, minute=total % 60, second=0, microsecond=0)
+
+
+def append_snapshot(df_results, min_gap_minutes=60, now=None):
     now = now or datetime.now(KST).replace(tzinfo=None)
+    bucket = _bucket(now, min_gap_minutes)        # 이 구간의 대표 시각
     hist = load_history()
+
+    # 같은 구간(버킷)이 이미 기록돼 있으면 건너뜀 → 구간당 점 1개 보장
     if not hist.empty:
         last = pd.to_datetime(hist["timestamp"]).max()
-        if (now - last).total_seconds() < min_gap_minutes * 60:
-            return hist  # 너무 이르면 적재 안 함
+        if bucket <= last:
+            return hist
 
     valid = df_results[df_results["유효"]]
     if valid.empty:
         return hist
 
-    ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    ts_str = bucket.strftime("%Y-%m-%d %H:%M:%S")
     new_rows = [
         {"ts": ts_str, "name": r["참가자"],
          "roi": round(float(r["수익률"]), 4), "rank": int(r["순위"])}
@@ -308,9 +319,10 @@ def append_snapshot(df_results, min_gap_minutes=5, now=None):
         return load_history()
 
     # 폴백: 로컬 CSV
-    new = pd.DataFrame([{"timestamp": now, "name": x["name"],
+    new = pd.DataFrame([{"timestamp": bucket, "name": x["name"],
                          "roi": x["roi"], "rank": x["rank"]} for x in new_rows])
     out = pd.concat([hist, new], ignore_index=True)
+    out = _dedup(out)
     out.to_csv(HISTORY_FILE, index=False)
     return out
 
@@ -488,21 +500,16 @@ def main():
 
     with st.sidebar:
         st.markdown("### ⚙️ 설정")
-        auto = st.toggle("자동 새로고침", value=False)
-        interval = st.select_slider("새로고침 간격", options=[30, 60, 120, 300],
-                                    value=60, format_func=lambda s: f"{s}초")
-        gap = st.select_slider("기록 간격(분)", options=[1, 3, 5, 10, 15, 30], value=5)
-        if not HAS_AUTOREFRESH and auto:
-            st.caption("⚠️ 자동 새로고침엔 `streamlit-autorefresh` 패키지가 필요해요.")
+        gap = st.radio("순위 기록 간격", options=[30, 60],
+                       index=1, format_func=lambda m: f"{m}분마다 1점",
+                       help="순위 추이 그래프에 점을 이 간격으로 찍습니다. "
+                            "앱을 열어둔 동안에만 기록돼요.")
         st.divider()
         mode = storage_mode()
         st.caption("☁️ Supabase에 기록 저장 중" if mode == "supabase"
                    else "💾 로컬 CSV에 기록 저장 중 (Supabase 미설정)")
         if st.button("🗑️ 순위 기록 초기화", use_container_width=True):
             st.success("기록을 초기화했어요." if clear_history() else "초기화에 실패했어요.")
-
-    if auto and HAS_AUTOREFRESH:
-        st_autorefresh(interval=interval * 1000, key="auto_refresh")
 
     with st.spinner("실시간 가격을 불러오는 중… (NXT / 프리·애프터마켓 포함) 🚀"):
         df, diag_map = build_results(PARTICIPANTS, get_price)
