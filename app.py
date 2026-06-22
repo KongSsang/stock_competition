@@ -4,6 +4,8 @@ import pandas as pd
 import requests
 import plotly.express as px
 from bs4 import BeautifulSoup
+from datetime import datetime
+import pytz
 
 # ============================================================
 # 페이지 기본 설정 & 글로벌 스타일
@@ -69,7 +71,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 유틸 함수 (주식 가격 수집)
+# 유틸 함수 (주식 가격 수집 - 프리장/애프터장 통합)
 # ============================================================
 def is_us_stock(ticker):
     base_ticker = str(ticker).split('.')[0]
@@ -82,32 +84,60 @@ def fetch_realtime_price(ticker_symbol):
     if is_us_stock(ticker_str):
         try:
             stock = yf.Ticker(ticker_str)
-            hist = stock.history(period="1d")
-            if len(hist) >= 1:
+            # prepost=True 를 통해 프리장/애프터장 데이터를 모두 포함시킵니다.
+            # 최근 5일(period)의 데이터를 1분 간격(interval)으로 가져와 가장 최신 값을 씁니다.
+            hist = stock.history(period="5d", interval="1m", prepost=True)
+            if not hist.empty:
                 curr_price = float(hist['Close'].iloc[-1])
-                return curr_price, "USD"
+                return curr_price, "USD (Extended)"
             return None, None
         except Exception:
             return None, None
     else:
         try:
             code = ticker_str.split('.')[0]
-            url = f"https://finance.naver.com/item/main.naver?code={code}"
             headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=5)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            price_tag = soup.select_one(".no_today .blind")
-            if not price_tag:
-                return None, None
-            curr_price = int(price_tag.text.replace(',', ''))
-            return float(curr_price), "KRW"
+            
+            # 1. 정규장 종가 스크래핑
+            url_main = f"https://finance.naver.com/item/main.naver?code={code}"
+            res_main = requests.get(url_main, headers=headers, timeout=5)
+            soup_main = BeautifulSoup(res_main.text, 'html.parser')
+            price_tag = soup_main.select_one(".no_today .blind")
+            regular_price = int(price_tag.text.replace(',', '')) if price_tag else None
+
+            # 2. 시간외 단일가 가격 스크래핑
+            url_after = f"https://finance.naver.com/item/sise_single.naver?code={code}"
+            res_after = requests.get(url_after, headers=headers, timeout=5)
+            soup_after = BeautifulSoup(res_after.text, 'html.parser')
+            
+            after_price = None
+            rows = soup_after.select('table.type2 tr')
+            for row in rows:
+                time_td = row.select_one('td.time')
+                if time_td and time_td.text.strip() != '':
+                    price_td = row.select_one('td.num span')
+                    if price_td:
+                        after_str = price_td.text.replace(',', '').strip()
+                        if after_str.isdigit():
+                            after_price = int(after_str)
+                            break # 가장 최근 시간외 체결가 1개만 파싱
+            
+            # 3. KST 시간 기준 로직 분기 (장중에는 정규장, 장마감 이후엔 시간외)
+            kst_now = datetime.now(pytz.timezone('Asia/Seoul'))
+            # 오후 16시(4시) 부터 다음날 아침 08시 30분 사이인지 확인
+            is_after_hours = (kst_now.hour >= 16) or (kst_now.hour < 8) or (kst_now.hour == 8 and kst_now.minute <= 30)
+
+            if is_after_hours and after_price is not None:
+                return float(after_price), "KRW (시간외)"
+            else:
+                return float(regular_price) if regular_price else None, "KRW (정규장)"
+                
         except Exception:
             return None, None
 
 # ============================================================
 # 데이터 설정 (참가자 정보)
 # ============================================================
-# 메모: 수량이 아닌 '평단가(Buy Price)'를 기준으로 수익률을 계산합니다.
 participants = [
     {"name": "참가자1", "stock_name": "SPCF", "ticker": "SPCF", "buy_price": 30.15},
     {"name": "참가자2", "stock_name": "LG씨엔에스", "ticker": "480560", "buy_price": 89900},
@@ -123,7 +153,7 @@ st.markdown(
     """
     <div class="hero-card">
         <h1>🏆 일주일 주식 수익률 데스매치</h1>
-        <p>오늘 산 종목, 일주일 뒤 승자는 누구인가?</p>
+        <p>프리장/시간외 가격 실시간 반영 중 🕒</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -131,7 +161,7 @@ st.markdown(
 
 results = []
 
-with st.spinner('실시간 주식 데이터를 불러오는 중입니다... 🚀'):
+with st.spinner('애프터마켓 데이터를 포함하여 실시간 가격을 불러오는 중입니다... 🚀'):
     for p in participants:
         curr_price, currency = fetch_realtime_price(p["ticker"])
         
@@ -142,17 +172,16 @@ with st.spinner('실시간 주식 데이터를 불러오는 중입니다... 🚀
                 "종목명": p["stock_name"],
                 "매수단가": p["buy_price"],
                 "현재가": curr_price,
-                "통화": currency,
+                "상태": currency, # 상태(정규장/시간외) 표시용
                 "수익률(%)": roi
             })
         else:
-            # 데이터 로드 실패 시 에러 처리
             results.append({
                 "참가자": p["name"],
                 "종목명": p["stock_name"],
                 "매수단가": p["buy_price"],
                 "현재가": 0,
-                "통화": "N/A",
+                "상태": "N/A",
                 "수익률(%)": 0.0
             })
 
@@ -186,7 +215,6 @@ st.subheader("🔥 참가자별 상세 현황")
 for idx, row in df_results.iterrows():
     rank = idx + 1
     
-    # 랭킹별 아이콘 및 스타일 부여
     if rank == 1:
         rank_html = f"<span class='rank-1'>🥇 1위</span>"
     elif rank == 2:
@@ -198,7 +226,9 @@ for idx, row in df_results.iterrows():
 
     roi_class = "profit-up" if row["수익률(%)"] >= 0 else "profit-down"
     roi_sign = "+" if row["수익률(%)"] >= 0 else ""
-    unit = "$" if row["통화"] == "USD" else "₩"
+    
+    # 통화 단위 표시 분기
+    unit = "$" if "USD" in row["상태"] else "₩"
     
     format_buy = f"{unit}{row['매수단가']:,.2f}" if unit == "$" else f"{unit}{row['매수단가']:,.0f}"
     format_curr = f"{unit}{row['현재가']:,.2f}" if unit == "$" else f"{unit}{row['현재가']:,.0f}"
@@ -210,7 +240,9 @@ for idx, row in df_results.iterrows():
             st.markdown(f"{rank_html}<br><span style='font-size:1.1rem;'>**{row['참가자']}**</span>", unsafe_allow_html=True)
             
         with col2:
-            st.markdown(f"<span style='color:#64748B; font-size:0.9rem;'>선택 종목</span><br>**{row['종목명']}**", unsafe_allow_html=True)
+            # 종목명 옆에 현재 가격이 어느 장(정규/시간외)인지 라벨링 추가
+            status_badge = f"<span style='font-size:0.75rem; background:#E2E8F0; padding:2px 6px; border-radius:4px; margin-left:6px;'>{row['상태']}</span>"
+            st.markdown(f"<span style='color:#64748B; font-size:0.9rem;'>선택 종목</span><br>**{row['종목명']}** {status_badge}", unsafe_allow_html=True)
             st.markdown(f"<span style='color:#94A3B8; font-size:0.8rem;'>매수: {format_buy} → 현재: {format_curr}</span>", unsafe_allow_html=True)
             
         with col3:
