@@ -98,83 +98,57 @@ def us_session_label(now_et: datetime) -> str:
 
 
 # ============================================================
-# 가격 수집 — 국내 (네이버 실시간 폴링 시세 = NXT 반영)
+# 가격 수집 — 국내 (네이버 /basic + overMarketPriceInfo = NXT 반영)
 # ============================================================
-def _extract_polling_row(payload):
-    """polling.finance.naver.com 응답에서 종목 row(dict) 하나를 꺼낸다.
-    응답 형태가 버전에 따라 달라서 두 형태 모두 처리."""
-    if not isinstance(payload, dict):
-        return None
-    # 형태 A: {"datas":[{...}]}
-    datas = payload.get("datas")
-    if isinstance(datas, list) and datas:
-        return datas[0]
-    # 형태 B: {"result":{"areas":[{"datas":[{...}]}]}}
-    result = payload.get("result") or {}
-    areas = result.get("areas") or []
-    if areas and isinstance(areas[0], dict):
-        ds = areas[0].get("datas") or []
-        if ds:
-            return ds[0]
-    return None
-
-
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_kr_price(code: str):
     """
-    1순위: 네이버 실시간 폴링 시세(nv = 현재가, NXT/애프터 반영)
-    2순위: m.stock.naver.com /basic 의 closePrice (정규장 위주, 폴백)
+    네이버 m.stock.naver.com /basic 사용.
+    - 정규장(09:00~15:30): closePrice = 실시간 현재가
+    - 장 외(프리 08:00~09:00 / 애프터 15:30~20:00): overMarketPriceInfo.overPrice = NXT 체결가
+      (overMarketStatus == 'OPEN' 일 때만 NXT가로 전환)
     반환: (price, session, currency, diag)
     """
     code = str(code).split(".")[0]
-    diag = {"code": code, "sources": {}}
-    price = prev = None
+    url = f"https://m.stock.naver.com/api/stock/{code}/basic"
+    b = requests.get(url, headers=NAVER_HEADERS, timeout=6).json()
 
-    # --- 1) 실시간 폴링 (path 형식 → query 형식 폴백) ---
-    for url in (
-        f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}",
-        f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}",
-    ):
-        try:
-            r = requests.get(url, headers=NAVER_HEADERS, timeout=6)
-            payload = r.json()
-            row = _extract_polling_row(payload)
-            if row:
-                p = _to_num(row.get("nv") or row.get("now") or row.get("closePrice"))
-                diag["sources"]["polling"] = {
-                    "url": url, "nv": row.get("nv"), "pcv": row.get("pcv"),
-                    "mt": row.get("mt"), "ms": row.get("ms"),
-                }
-                if p:
-                    price = p
-                    prev = _to_num(row.get("pcv"))
-                    diag["picked"] = "polling.nv"
-                    break
-        except Exception as e:
-            diag["sources"]["polling_err"] = str(e)
+    close_price = _to_num(b.get("closePrice"))          # KRX 현재가/종가
+    over = b.get("overMarketPriceInfo") or {}
+    over_price = _to_num(over.get("overPrice"))          # NXT 프리/애프터 체결가
+    over_status = over.get("overMarketStatus")           # OPEN / CLOSE
+    session_type = over.get("tradingSessionType")        # PRE_MARKET / AFTER_MARKET
 
-    # --- 2) /basic 폴백 ---
-    if price is None:
-        try:
-            url = f"https://m.stock.naver.com/api/stock/{code}/basic"
-            b = requests.get(url, headers=NAVER_HEADERS, timeout=6).json()
-            diag["sources"]["basic"] = {
-                "closePrice": b.get("closePrice"),
-                "localTradedAt": b.get("localTradedAt"),
-                "marketStatus": b.get("marketStatus"),
-            }
-            p = _to_num(b.get("closePrice"))
-            if p:
-                price = p
-                diag["picked"] = "basic.closePrice"
-        except Exception as e:
-            diag["sources"]["basic_err"] = str(e)
+    now = datetime.now(KST)
+    in_regular = 9 * 60 <= (now.hour * 60 + now.minute) < 15 * 60 + 30
+
+    if (not in_regular) and over_status == "OPEN" and over_price:
+        price = over_price
+        if session_type == "PRE_MARKET":
+            session = "NXT 프리"
+        elif session_type == "AFTER_MARKET":
+            session = "NXT 애프터"
+        else:
+            session = "NXT"
+        picked = "overMarketPriceInfo.overPrice"
+    else:
+        price = close_price
+        session = kr_session_label(now)
+        picked = "closePrice"
 
     if price is None:
         raise RuntimeError("KR price unavailable")
 
-    diag["prev_close"] = prev
-    return price, kr_session_label(datetime.now(KST)), "KRW", diag
+    diag = {
+        "code": code, "picked": picked,
+        "closePrice (KRX)": b.get("closePrice"),
+        "overPrice (NXT)": over.get("overPrice"),
+        "overMarketStatus": over_status,
+        "tradingSessionType": session_type,
+        "localTradedAt": over.get("localTradedAt") or b.get("localTradedAt"),
+        "marketStatus": b.get("marketStatus"),
+    }
+    return price, session, "KRW", diag
 
 
 # ============================================================
