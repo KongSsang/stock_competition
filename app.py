@@ -89,7 +89,8 @@ def us_session_label(now_et: datetime) -> str:
         return "프리마켓"
     if 16 * 60 <= minutes < 20 * 60:
         return "애프터마켓"
-    return "장마감"
+    # 20:00~익일 04:00 = 오버나이트(미국주식 주간거래) = "데이마켓"
+    return "데이마켓"
 
 
 # ============================================================
@@ -151,7 +152,9 @@ def fetch_kr_price(code: str):
 # ============================================================
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_us_price(ticker: str):
-    """prepost 포함 1분봉의 마지막 유효 체결가. 실패 시 일봉 종가로 폴백."""
+    """prepost 포함 1분봉의 마지막 유효 체결가.
+    세션 라벨은 '마지막 체결 시각(ET)' 기준으로 매겨, 오버나이트(데이마켓)까지 잡는다.
+    실패 시 일봉 종가로 폴백."""
     t = yf.Ticker(ticker)
     diag = {"ticker": ticker, "sources": {}}
     try:
@@ -160,13 +163,26 @@ def fetch_us_price(ticker: str):
         if len(closes) > 0:
             price = float(closes.iloc[-1])
             last_ts = closes.index[-1]
+            # 마지막 체결 시각을 ET 로 변환
+            if last_ts.tzinfo is None:
+                last_et = ET.localize(last_ts.to_pydatetime())
+            else:
+                last_et = last_ts.tz_convert(ET).to_pydatetime()
+            age_min = (datetime.now(ET) - last_et).total_seconds() / 60.0
+
+            session = us_session_label(last_et)      # 체결이 일어난 세션(정규/프리/애프터/데이마켓)
+            if age_min > 90:                          # 90분 넘게 새 체결 없음 = 사실상 장마감/휴장
+                session = "장마감"
+
             diag["sources"]["prepost_1m"] = {
                 "price": round(price, 4),
-                "last_bar": str(last_ts),
+                "last_bar_ET": last_et.strftime("%Y-%m-%d %H:%M ET"),
+                "age_min": round(age_min, 1),
+                "session": session,
                 "bars": int(len(closes)),
             }
             diag["picked"] = "prepost_1m"
-            return price, us_session_label(datetime.now(ET)), "USD", diag
+            return price, session, "USD", diag
     except Exception as e:
         diag["sources"]["prepost_err"] = str(e)
 
