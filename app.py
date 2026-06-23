@@ -34,11 +34,12 @@ IDENTITY_PALETTE = [
 ]
 
 PARTICIPANTS = [
-    {"name": "송재준", "stock_name": "SPCF",        "ticker": "SPCF",   "buy_price": 30.15},
-    {"name": "공상민", "stock_name": "LG씨엔에스",   "ticker": "064400", "buy_price": 89900},
-    {"name": "변우진", "stock_name": "한국금융지주", "ticker": "071050", "buy_price": 221500},
-    {"name": "오호근", "stock_name": "엔비디아",     "ticker": "NVDA",   "buy_price": 209.63},
-    {"name": "박범휘", "stock_name": "한미반도체",   "ticker": "042700", "buy_price": 300500},
+    # sell_price 를 None 으로 두면 실시간, 숫자를 넣으면 그 가격으로 '매도완료'(수익률 고정).
+    {"name": "송재준", "stock_name": "SPCF",        "ticker": "SPCF",   "buy_price": 30.15,  "sell_price": 25.38},
+    {"name": "공상민", "stock_name": "LG씨엔에스",   "ticker": "064400", "buy_price": 89900,  "sell_price": None},
+    {"name": "변우진", "stock_name": "한국금융지주", "ticker": "071050", "buy_price": 221500, "sell_price": None},
+    {"name": "오호근", "stock_name": "엔비디아",     "ticker": "NVDA",   "buy_price": 209.63, "sell_price": None},
+    {"name": "박범휘", "stock_name": "한미반도체",   "ticker": "042700", "buy_price": 300500, "sell_price": None},
 ]
 
 NAVER_HEADERS = {
@@ -196,17 +197,33 @@ def build_results(participants, price_lookup):
     """반환: (정렬·순위 부여된 DataFrame, diag_map[name]=diag)"""
     rows, diag_map = [], {}
     for p in participants:
+        sell = p.get("sell_price")
+
+        # 매도완료: 실시간 조회 없이 매도가로 수익률 고정
+        if sell is not None:
+            cur = "USD" if is_us_stock(p["ticker"]) else "KRW"
+            roi = (sell - p["buy_price"]) / p["buy_price"] * 100
+            diag_map[p["name"]] = {"sold": True, "sell_price": sell, "roi": round(roi, 4)}
+            rows.append({"참가자": p["name"], "종목명": p["stock_name"],
+                         "매수단가": p["buy_price"], "현재가": sell,
+                         "통화": cur, "세션": "매도완료", "수익률": roi,
+                         "유효": True, "매도": True})
+            continue
+
+        # 보유중: 실시간 가격
         price, session, cur, diag = price_lookup(p)
         diag_map[p["name"]] = diag
         if price is not None:
             roi = (price - p["buy_price"]) / p["buy_price"] * 100
             rows.append({"참가자": p["name"], "종목명": p["stock_name"],
                          "매수단가": p["buy_price"], "현재가": price,
-                         "통화": cur, "세션": session, "수익률": roi, "유효": True})
+                         "통화": cur, "세션": session, "수익률": roi,
+                         "유효": True, "매도": False})
         else:
             rows.append({"참가자": p["name"], "종목명": p["stock_name"],
                          "매수단가": p["buy_price"], "현재가": None,
-                         "통화": None, "세션": "조회실패", "수익률": None, "유효": False})
+                         "통화": None, "세션": "조회실패", "수익률": None,
+                         "유효": False, "매도": False})
 
     df = pd.DataFrame(rows)
     df = df.sort_values(by=["유효", "수익률"], ascending=[False, False]).reset_index(drop=True)
@@ -482,6 +499,8 @@ html, body, .stApp, p, label, span, div { font-family: 'Noto Sans KR', sans-seri
 .row .who .meta{ color:#94A3B8; font-size:.78rem; margin-top:1px; }
 .row .badge{ font-size:.68rem; font-weight:700; padding:.12rem .45rem; border-radius:6px;
    background:#EEF2F6; color:#64748B; margin-left:.4rem; vertical-align:middle; }
+.row .badge-sold{ background:#DCFCE7; color:#15803D; }
+.row.sold{ background:#FAFCFA; }
 .row .pr{ font-family:'JetBrains Mono', monospace; font-weight:800; font-size:1.05rem; white-space:nowrap; }
 .up{ color:#E11D48 !important; } .down{ color:#2563EB !important; } .flat{ color:#64748B !important; }
 .stButton>button{ border-radius:12px; border:1px solid #E5E9F0; font-weight:700; background:#fff; color:#0F172A; }
@@ -548,8 +567,9 @@ def main():
         for i in range(min(3, len(valid))):
             r = valid.loc[i]
             sc = "up" if r["수익률"] >= 0 else "down"
+            lock = " 🔒" if r.get("매도") else ""
             cards.append(f'<div class="pod {classes[i]}"><div class="medal">{medals[i]}</div>'
-                         f'<div class="nm">{r["참가자"]}</div><div class="stk">{r["종목명"]}</div>'
+                         f'<div class="nm">{r["참가자"]}{lock}</div><div class="stk">{r["종목명"]}</div>'
                          f'<div class="roi {sc}">{r["수익률"]:+.2f}%</div></div>')
         st.markdown(f'<div class="podium">{"".join(cards)}</div>', unsafe_allow_html=True)
 
@@ -568,19 +588,26 @@ def main():
 
     st.markdown('<div class="sec-title"><span class="bar"></span>🔥 전체 랭킹</div>', unsafe_allow_html=True)
     for _, r in df.iterrows():
+        sold = bool(r.get("매도"))
         if r["유효"]:
             sc = "up" if r["수익률"] > 0 else ("down" if r["수익률"] < 0 else "flat")
             sign = "+" if r["수익률"] >= 0 else ""
             rk, roi_txt = f"{int(r['순위'])}", f"{sign}{r['수익률']:.2f}%"
-            price_txt = (f"매수 {fmt_price(r['매수단가'], r['통화'])} → "
-                         f"현재 {fmt_price(r['현재가'], r['통화'])}")
-            badge = f'<span class="badge">{r["세션"]}</span>'
+            if sold:
+                price_txt = (f"매수 {fmt_price(r['매수단가'], r['통화'])} → "
+                             f"매도 {fmt_price(r['현재가'], r['통화'])} (확정)")
+                badge = '<span class="badge badge-sold">🔒 매도완료</span>'
+            else:
+                price_txt = (f"매수 {fmt_price(r['매수단가'], r['통화'])} → "
+                             f"현재 {fmt_price(r['현재가'], r['통화'])}")
+                badge = f'<span class="badge">{r["세션"]}</span>'
         else:
             sc, roi_txt, rk = "flat", "조회실패", "–"
             price_txt, badge = "가격을 불러오지 못했어요", '<span class="badge">N/A</span>'
         dot = color_map.get(r["참가자"], "#CBD5E1")
+        row_cls = "row sold" if sold else "row"
         st.markdown(
-            f'<div class="row"><div class="rk">{rk}</div>'
+            f'<div class="{row_cls}"><div class="rk">{rk}</div>'
             f'<div class="dot" style="background:{dot}"></div>'
             f'<div class="who"><div class="nm">{r["참가자"]} {badge}</div>'
             f'<div class="meta">{r["종목명"]} · {price_txt}</div></div>'
