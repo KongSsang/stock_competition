@@ -43,6 +43,13 @@ PARTICIPANTS = [
     {"name": "박범휘", "stock_name": "한미반도체",   "ticker": "042700", "buy_price": 300500, "sell_price": 258000},
 ]
 
+# ── 시즌 설정 ────────────────────────────────────────────────
+# 시즌1이 끝났으면 True (LIVE 대신 '종료' 배너 + 우승자 표시, 기록 적재 중단).
+# 최종 수익률을 확정하려면 위 참가자들의 sell_price 에 각자 매도가를 채워주세요.
+SEASON1_ENDED = True
+# 시즌2 시작할 때 여기에 새 참가자들을 채우면 됩니다. (지금은 준비중 페이지)
+SEASON2_PARTICIPANTS = []
+
 NAVER_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
@@ -568,6 +575,23 @@ html, body, .stApp, p, label, span, div { font-family: 'Noto Sans KR', sans-seri
 .up{ color:#E11D48 !important; } .down{ color:#2563EB !important; } .flat{ color:#64748B !important; }
 .stButton>button{ border-radius:12px; border:1px solid #E5E9F0; font-weight:700; background:#fff; color:#0F172A; }
 .stButton>button:hover{ border-color:#4F46E5; color:#4F46E5; }
+.ended{ display:inline-flex; align-items:center; gap:.4rem; background:rgba(148,163,184,.18);
+   color:#E2E8F0; border:1px solid rgba(203,213,225,.35); padding:.2rem .6rem; border-radius:999px; font-size:.78rem; font-weight:700; }
+.champion{ display:flex; align-items:center; gap:1rem; background:linear-gradient(135deg,#FEF3C7,#FDE68A);
+   border:1px solid #FCD34D; border-radius:18px; padding:1rem 1.3rem; margin-bottom:1.2rem;
+   box-shadow:0 10px 24px -12px rgba(245,158,11,.5); }
+.champion .crown{ font-size:2rem; }
+.champion .ctext{ flex:1; }
+.champion .clabel{ color:#92400E; font-size:.72rem; font-weight:800; letter-spacing:.1em; }
+.champion .cname{ color:#78350F; font-weight:800; font-size:1.15rem; margin-top:2px; }
+.champion .croi{ font-family:'JetBrains Mono',monospace; font-weight:800; font-size:1.5rem; }
+.coming{ text-align:center; padding:4rem 1.5rem; background:#fff; border:1px dashed #CBD5E1;
+   border-radius:20px; margin-top:1rem; }
+.coming .badge2{ display:inline-block; background:#EEF2FF; color:#4F46E5; font-weight:800;
+   letter-spacing:.15em; font-size:.75rem; padding:.3rem .7rem; border-radius:999px; }
+.coming .big{ font-family:'Black Han Sans',sans-serif; font-size:2.6rem; color:#0F172A; margin:1rem 0 .2rem; }
+.coming .cs{ color:#94A3B8; font-weight:800; letter-spacing:.35em; font-size:.9rem; }
+.coming .desc{ color:#64748B; margin-top:1rem; font-size:.95rem; }
 </style>
 """
 
@@ -575,54 +599,78 @@ html, body, .stApp, p, label, span, div { font-family: 'Noto Sans KR', sans-seri
 # ============================================================
 # 메인
 # ============================================================
-def main():
-    st.set_page_config(page_title="🏆 주식 수익률 데스매치", page_icon="🏆", layout="centered")
-    st.markdown(CSS, unsafe_allow_html=True)
-    color_map = color_map_for([p["name"] for p in PARTICIPANTS])
+# ============================================================
+# 시즌 2 (준비중)
+# ============================================================
+def render_season2():
+    st.markdown(
+        """
+        <div class="coming">
+            <div class="badge2">SEASON 2</div>
+            <div class="big">🔜 준비중</div>
+            <div class="cs">COMING SOON</div>
+            <p class="desc">시즌 2는 곧 시작됩니다. 새 종목 픽을 정하고 다시 붙어봅시다 🔥</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    with st.sidebar:
-        st.markdown("### ⚙️ 설정")
-        gap = st.radio("순위 기록 간격", options=[30, 60],
-                       index=1, format_func=lambda m: f"{m}분마다 1점",
-                       help="순위 추이 그래프에 점을 이 간격으로 찍습니다. "
-                            "앱을 열어둔 동안에만 기록돼요.")
-        st.divider()
-        mode = storage_mode()
-        st.caption("☁️ Supabase에 기록 저장 중" if mode == "supabase"
-                   else "💾 로컬 CSV에 기록 저장 중 (Supabase 미설정)")
-        if st.button("🗑️ 순위 기록 초기화", use_container_width=True):
-            st.success("기록을 초기화했어요." if clear_history() else "초기화에 실패했어요.")
 
-    with st.spinner("실시간 가격을 불러오는 중… (NXT / 프리·애프터마켓 포함) 🚀"):
+# ============================================================
+# 시즌 1 대시보드
+# ============================================================
+def render_season1(color_map, gap):
+    with st.spinner("가격을 불러오는 중… 🚀"):
         df, diag_map = build_results(PARTICIPANTS, get_price)
 
-    history = append_snapshot(df, min_gap_minutes=gap)
+    # 종료 시엔 기록을 추가하지 않고 읽기만 함
+    history = load_history() if SEASON1_ENDED else append_snapshot(df, min_gap_minutes=gap)
     now_kst = datetime.now(KST)
     leader = df[df["유효"]].iloc[0] if df["유효"].any() else None
+
+    # ── 히어로 (종료/진행중 분기) ──
+    if SEASON1_ENDED:
+        eyebrow, status = "SEASON 1 · FINAL", '<span class="ended">🏁 시즌 종료</span>'
+        tail = ("· 🏆 " + leader["참가자"] + " 우승") if leader is not None else ""
+    else:
+        eyebrow, status = "WEEKLY RETURN · 친구들 주식 대결", '<span class="live"><span class="dot"></span>LIVE</span>'
+        tail = ("· 🥇 " + leader["참가자"] + " 선두") if leader is not None else ""
 
     st.markdown(
         f"""
         <div class="hero">
-            <p class="eyebrow">WEEKLY RETURN · 친구들 주식 대결</p>
+            <p class="eyebrow">{eyebrow}</p>
             <h1>주식 수익률 데스매치</h1>
-            <p class="sub">
-                <span class="live"><span class="dot"></span>LIVE</span>
-                &nbsp; 업데이트 {now_kst.strftime('%m월 %d일 %H:%M:%S')} (KST)
-                {'· 🥇 ' + leader['참가자'] + ' 선두' if leader is not None else ''}
-            </p>
+            <p class="sub">{status} &nbsp; {now_kst.strftime('%m월 %d일 %H:%M')} (KST) {tail}</p>
         </div>
         """, unsafe_allow_html=True)
 
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        if st.button("🔄 지금 새로고침", use_container_width=True):
-            fetch_kr_price.clear()
-            fetch_us_price.clear()
-            st.rerun()
-    with c2:
-        n_ok = len(df[df["유효"]])
-        st.caption(f"📍 {n_ok}/{len(df)}명 조회 성공 · 기록 {len(history)//max(n_ok,1)}회차")
+    # ── 종료 시 우승 배너 ──
+    if SEASON1_ENDED and leader is not None:
+        sc = "up" if leader["수익률"] >= 0 else "down"
+        st.markdown(
+            f"""
+            <div class="champion">
+                <div class="crown">👑</div>
+                <div class="ctext">
+                    <div class="clabel">시즌 1 챔피언</div>
+                    <div class="cname">{leader['참가자']} · {leader['종목명']}</div>
+                </div>
+                <div class="croi {sc}">{leader['수익률']:+.2f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
 
+    # ── 진행중일 때만 새로고침 버튼 ──
+    if not SEASON1_ENDED:
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if st.button("🔄 지금 새로고침", use_container_width=True):
+                fetch_kr_price.clear()
+                fetch_us_price.clear()
+                st.rerun()
+        with c2:
+            n_ok = len(df[df["유효"]])
+            st.caption(f"📍 {n_ok}/{len(df)}명 조회 성공 · 기록 {len(history)//max(n_ok,1)}회차")
+
+    # ── 시상대 ──
     valid = df[df["유효"]].reset_index(drop=True)
     if len(valid) >= 1:
         st.markdown('<div class="sec-title"><span class="bar"></span>🏅 시상대</div>', unsafe_allow_html=True)
@@ -636,6 +684,7 @@ def main():
                          f'<div class="roi {sc}">{r["수익률"]:+.2f}%</div></div>')
         st.markdown(f'<div class="podium">{"".join(cards)}</div>', unsafe_allow_html=True)
 
+    # ── 순위 추이 ──
     st.markdown('<div class="sec-title"><span class="bar"></span>📈 순위 추이</div>', unsafe_allow_html=True)
     distinct_times = pd.to_datetime(history["timestamp"]).nunique() if not history.empty else 0
     if distinct_times >= 2:
@@ -644,12 +693,16 @@ def main():
     else:
         st.info("기록이 2회 이상 쌓이면 시간에 따른 순위 변화가 그래프로 나타나요. ⏱️")
 
-    st.markdown('<div class="sec-title"><span class="bar"></span>📊 현재 수익률</div>', unsafe_allow_html=True)
+    # ── 수익률 막대 ──
+    bar_title = "📊 최종 수익률" if SEASON1_ENDED else "📊 현재 수익률"
+    st.markdown(f'<div class="sec-title"><span class="bar"></span>{bar_title}</div>', unsafe_allow_html=True)
     if len(valid) >= 1:
         st.plotly_chart(build_roi_bar_figure(df),
                         use_container_width=True, config={"displayModeBar": False})
 
-    st.markdown('<div class="sec-title"><span class="bar"></span>🔥 전체 랭킹</div>', unsafe_allow_html=True)
+    # ── 전체 랭킹 ──
+    rank_title = "🏁 최종 순위" if SEASON1_ENDED else "🔥 전체 랭킹"
+    st.markdown(f'<div class="sec-title"><span class="bar"></span>{rank_title}</div>', unsafe_allow_html=True)
     for _, r in df.iterrows():
         sold = bool(r.get("매도"))
         if r["유효"]:
@@ -676,21 +729,48 @@ def main():
             f'<div class="meta">{r["종목명"]} · {price_txt}</div></div>'
             f'<div class="pr {sc}">{roi_txt}</div></div>', unsafe_allow_html=True)
 
+    # ── 보조 그래프 ──
     if distinct_times >= 2:
         with st.expander("📉 수익률 추이 그래프 보기"):
             st.plotly_chart(build_roi_trend_figure(history, color_map),
                             use_container_width=True, config={"displayModeBar": False})
 
-    # ── 가격 진단: 소스별 원본값 확인 ──
+    # ── 가격 진단 ──
     with st.expander("🔧 가격 진단 (값이 이상하면 열어보세요)"):
-        st.caption("각 종목을 어떤 소스의 어떤 값으로 채웠는지 보여줘요. "
-                   "실제 시세와 다르면 이 내용을 캡처해 알려주시면 정확히 맞출 수 있어요.")
+        st.caption("각 종목을 어떤 소스의 어떤 값으로 채웠는지 보여줘요.")
         for p in PARTICIPANTS:
             d = diag_map.get(p["name"], {})
             st.markdown(f"**{p['name']} · {p['stock_name']} ({p['ticker']})** "
                         f"— picked: `{d.get('picked', d.get('error', '—'))}`")
             st.json(d, expanded=False)
         st.caption(f"저장소: {'☁️ Supabase' if storage_mode()=='supabase' else '💾 로컬 CSV'} · 총 {len(history)}행")
+
+
+# ============================================================
+# 메인 (탭 구성)
+# ============================================================
+def main():
+    st.set_page_config(page_title="🏆 주식 수익률 데스매치", page_icon="🏆", layout="centered")
+    st.markdown(CSS, unsafe_allow_html=True)
+    color_map = color_map_for([p["name"] for p in PARTICIPANTS])
+
+    with st.sidebar:
+        st.markdown("### ⚙️ 설정")
+        gap = st.radio("순위 기록 간격", options=[30, 60],
+                       index=1, format_func=lambda m: f"{m}분마다 1점",
+                       help="순위 추이 그래프 점 간격. 시즌 진행 중에만 기록돼요.")
+        st.divider()
+        mode = storage_mode()
+        st.caption("☁️ Supabase에 기록 저장 중" if mode == "supabase"
+                   else "💾 로컬 CSV에 기록 저장 중 (Supabase 미설정)")
+        if st.button("🗑️ 순위 기록 초기화", use_container_width=True):
+            st.success("기록을 초기화했어요." if clear_history() else "초기화에 실패했어요.")
+
+    tab1, tab2 = st.tabs(["🏆 시즌 1", "🔜 시즌 2"])
+    with tab1:
+        render_season1(color_map, gap)
+    with tab2:
+        render_season2()
 
 
 if __name__ == "__main__":
