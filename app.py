@@ -37,10 +37,10 @@ IDENTITY_PALETTE = [
 PARTICIPANTS = [
     # sell_price 를 None 으로 두면 실시간, 숫자를 넣으면 그 가격으로 '매도완료'(수익률 고정).
     {"name": "송재준", "stock_name": "SPCF",        "ticker": "SPCF",   "buy_price": 30.15,  "sell_price": 25.38},
-    {"name": "공상민", "stock_name": "LG씨엔에스",   "ticker": "064400", "buy_price": 89900,  "sell_price": None},
-    {"name": "변우진", "stock_name": "한국금융지주", "ticker": "071050", "buy_price": 221500, "sell_price": None},
-    {"name": "오호근", "stock_name": "엔비디아",     "ticker": "NVDA",   "buy_price": 209.63, "sell_price": None},
-    {"name": "박범휘", "stock_name": "한미반도체",   "ticker": "042700", "buy_price": 300500, "sell_price": None},
+    {"name": "공상민", "stock_name": "LG씨엔에스",   "ticker": "064400", "buy_price": 89900,  "sell_price": 78900},
+    {"name": "변우진", "stock_name": "한국금융지주", "ticker": "071050", "buy_price": 221500, "sell_price": 221000},
+    {"name": "오호근", "stock_name": "엔비디아",     "ticker": "NVDA",   "buy_price": 209.63, "sell_price": 199.21},
+    {"name": "박범휘", "stock_name": "한미반도체",   "ticker": "042700", "buy_price": 300500, "sell_price": 258000},
 ]
 
 NAVER_HEADERS = {
